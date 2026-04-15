@@ -90,22 +90,20 @@
         .stat-num { font-size: 1.6em; font-weight: bold; color: #0E3F5E; }
         .stat-label { font-size: 0.75em; color: #666; margin-top: 2px; }
 
-        .btn-row { display: flex; gap: 10px; }
-
         .download-btn {
-            flex: 1;
+            width: 100%;
             border: none;
-            padding: 12px 20px;
-            font-size: 0.95em;
+            padding: 14px 20px;
+            font-size: 1em;
             border-radius: 10px;
             cursor: pointer;
             font-weight: bold;
             transition: all 0.3s ease;
             color: white;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
         }
-        .btn-xlsx { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
-        .btn-zip  { background: linear-gradient(135deg, #0E3F5E 0%, #669DB3 100%); }
         .download-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.25); }
+        .download-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
 
         .importer-list {
             margin-top: 14px;
@@ -136,6 +134,8 @@
         .importer-item:nth-child(even) { background: #f4fafd; }
         .importer-count { color: #669DB3; font-weight: bold; }
 
+        .no-zip-note { text-align:center; color:#888; font-size:0.85em; margin-top:10px; }
+
         .error-message {
             background: #fee; color: #c33;
             padding: 12px; border-radius: 10px;
@@ -147,13 +147,13 @@
 <body>
 <div class="container">
     <h1>📋 Chapter 99 Entry Filter</h1>
-    <p class="subtitle">Generates an XLSX summary and per-importer CSVs from an EDI CSV export</p>
+    <p class="subtitle">Generates a Ch99 XLSX summary and per-importer CSVs from an EDI CSV export</p>
 
     <div class="info-box">
         <h3>ℹ️ Outputs:</h3>
         <ul>
-            <li><strong>XLSX</strong> — All entries with any HTS starting with <strong>99</strong>: Entry #, Importer, and all matching 99-series codes found</li>
-            <li><strong>ZIP of CSVs</strong> — One CSV per importer containing entry numbers that have <strong>990301</strong> or <strong>990302</strong> HTS codes</li>
+            <li><strong>XLSX</strong> — All entries with any HTS starting with <strong>99</strong>: Entry #, Importer Name, then HTS_1 / HTS_2 / … filled with the actual 99-series codes</li>
+            <li><strong>ZIP</strong> — Contains the XLSX above <em>plus</em> one CSV per importer with entry numbers that have <strong>990301</strong> or <strong>990302</strong> HTS codes</li>
         </ul>
     </div>
 
@@ -178,10 +178,7 @@
         <div class="success-icon">✅</div>
         <div class="result-message" id="resultMessage"></div>
         <div class="stat-row" id="statRow"></div>
-        <div class="btn-row">
-            <button class="download-btn btn-xlsx" onclick="downloadXlsx()">⬇️ Download XLSX Summary</button>
-            <button class="download-btn btn-zip"  onclick="downloadZip()">📦 Download Importer CSVs (ZIP)</button>
-        </div>
+        <button class="download-btn" id="downloadBtn" onclick="downloadAll()">⬇️ Download XLSX + Importer CSVs</button>
         <div id="importerListWrap"></div>
     </div>
 
@@ -202,11 +199,13 @@
     const statRow           = document.getElementById('statRow');
     const importerListWrap  = document.getElementById('importerListWrap');
     const errorMessage      = document.getElementById('errorMessage');
+    const downloadBtn       = document.getElementById('downloadBtn');
 
-    let xlsxWorkbook = null;     // XLSX workbook for 99-series summary
-    let importerCsvMap = null;   // Map of importerName -> CSV string (990301/990302 only)
+    let xlsxWorkbook   = null;
+    let importerCsvMap = null;  // Map: importerName -> CSV string (990301/990302 only)
+    let hasZip         = false;
 
-    // ── Upload handlers ──────────────────────────────────────────────────────
+    // ── Upload handlers ───────────────────────────────────────────────────────
     uploadArea.addEventListener('click', () => fileInput.click());
     uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
@@ -223,30 +222,23 @@
         fileInfo.classList.add('active');
         resultContainer.classList.remove('active');
         errorMessage.classList.remove('active');
-        xlsxWorkbook = null;
-        importerCsvMap = null;
+        xlsxWorkbook = null; importerCsvMap = null; hasZip = false;
         const reader = new FileReader();
         reader.onload = e => processCSV(e.target.result);
         reader.readAsText(file);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-    function isHts99(hts)       { return hts.replace(/[^0-9]/g, '').startsWith('99'); }
+    function isHts99(hts)         { return hts.replace(/[^0-9]/g, '').startsWith('99'); }
     function isHts990301or02(hts) {
         const d = hts.replace(/[^0-9]/g, '');
         return d.startsWith('990301') || d.startsWith('990302');
     }
-    function fmtEntry(raw) {
-        if (!raw) return '';
-        return 'EF4' + raw.replace(/[^0-9]/g, '');
-    }
-    function sanitizeFilename(s) {
-        return s.replace(/[\\/:*?"<>|]/g, '_').trim() || 'UNKNOWN';
-    }
+    function fmtEntry(raw) { return raw ? 'EF4' + raw.replace(/[^0-9]/g, '') : ''; }
+    function sanitizeFilename(s) { return s.replace(/[\\/:*?"<>|]/g, '_').trim() || 'UNKNOWN'; }
 
     function parseCSVLine(line) {
-        const result = [];
-        let cur = '', inQ = false;
+        const result = []; let cur = '', inQ = false;
         for (let i = 0; i < line.length; i++) {
             const ch = line[i];
             if (ch === '"') { inQ = !inQ; }
@@ -274,9 +266,7 @@
             const colMap = {};
             headers.forEach((h, i) => { colMap[h.trim()] = i; });
 
-            // Required columns
-            const required = ['BROKERREFERENCE', 'ENTRYNUMBER', 'IMPORTERNAME',
-                               'HTS_NUMBER', 'ENTEREDVALUE'];
+            const required = ['ENTRYNUMBER', 'IMPORTERNAME', 'HTS_NUMBER'];
             const missing = required.filter(c => !colMap.hasOwnProperty(c));
             if (missing.length) {
                 progressContainer.classList.remove('active');
@@ -286,38 +276,32 @@
 
             updateProgress(20, 'Scanning HTS codes...');
 
-            // ── Collect all HTS columns present in this file ─────────────
+            // Collect all HTS number columns present in the file
             const allHtsCols = ['HTS_NUMBER'];
             for (let n = 1; n <= 10; n++) {
                 if (colMap[`ADL${n}_HTS_NUMBER`] !== undefined) allHtsCols.push(`ADL${n}_HTS_NUMBER`);
             }
 
-            // ── Per-entry data structures ────────────────────────────────
-            // entry99Map:     entryFormatted -> { importer, hts99Set }
-            // entry990301Map: entryFormatted -> importer   (990301/990302 only)
-            const entry99Map    = new Map();
+            // entry99Map:      entry -> { importer, hts99: string[] (ordered, unique) }
+            // entry990301Map:  entry -> importer
+            const entry99Map     = new Map();
             const entry990301Map = new Map();
 
             for (let i = 1; i < lines.length; i++) {
                 if (!lines[i].trim()) continue;
-                const vals = parseCSVLine(lines[i]);
-
-                const entryRaw  = (vals[colMap['ENTRYNUMBER']] || '').trim();
-                const entry     = fmtEntry(entryRaw);
-                const importer  = (vals[colMap['IMPORTERNAME']] || '').trim() || 'UNKNOWN';
-
+                const vals     = parseCSVLine(lines[i]);
+                const entry    = fmtEntry((vals[colMap['ENTRYNUMBER']] || '').trim());
+                const importer = (vals[colMap['IMPORTERNAME']] || '').trim() || 'UNKNOWN';
                 if (!entry) continue;
 
-                // Collect all 99-series HTS codes for this entry row
                 for (const col of allHtsCols) {
                     const hts = (vals[colMap[col]] || '').trim();
                     if (!hts) continue;
 
                     if (isHts99(hts)) {
-                        if (!entry99Map.has(entry)) {
-                            entry99Map.set(entry, { importer, hts99: new Set() });
-                        }
-                        entry99Map.get(entry).hts99.add(hts);
+                        if (!entry99Map.has(entry)) entry99Map.set(entry, { importer, hts99: [] });
+                        const rec = entry99Map.get(entry);
+                        if (!rec.hts99.includes(hts)) rec.hts99.push(hts);
                     }
 
                     if (isHts990301or02(hts)) {
@@ -336,35 +320,33 @@
 
             updateProgress(62, 'Building XLSX summary...');
 
-            // ── Build XLSX ───────────────────────────────────────────────
-            // Discover all unique 99-series HTS codes across all entries (for dynamic columns)
-            const allHts99Codes = new Set();
-            entry99Map.forEach(v => v.hts99.forEach(h => allHts99Codes.add(h)));
-            const hts99Sorted = [...allHts99Codes].sort();
+            // Max HTS codes on any single entry → determines number of HTS_N columns
+            let maxHts = 0;
+            entry99Map.forEach(v => { if (v.hts99.length > maxHts) maxHts = v.hts99.length; });
 
-            const xlsxHeaders = ['Entry #', 'Importer Name', ...hts99Sorted];
+            const htsHeaders = Array.from({ length: maxHts }, (_, i) => `HTS_${i + 1}`);
+            const xlsxHeaders = ['Entry #', 'Importer Name', ...htsHeaders];
             const xlsxRows = [xlsxHeaders];
 
-            // Sort entries by importer name then entry number
-            const sortedEntries = [...entry99Map.entries()].sort((a, b) => {
+            // Sort by importer then entry number
+            const sorted = [...entry99Map.entries()].sort((a, b) => {
                 const ic = a[1].importer.localeCompare(b[1].importer);
                 return ic !== 0 ? ic : a[0].localeCompare(b[0]);
             });
 
-            for (const [entry, { importer, hts99 }] of sortedEntries) {
+            for (const [entry, { importer, hts99 }] of sorted) {
                 const row = [entry, importer];
-                for (const code of hts99Sorted) {
-                    row.push(hts99.has(code) ? '✓' : '');
-                }
+                for (let n = 0; n < maxHts; n++) row.push(hts99[n] || '');
                 xlsxRows.push(row);
             }
 
+            // Build worksheet
             const ws = XLSX.utils.aoa_to_sheet(xlsxRows);
-            applyXlsxFormatting(ws, xlsxRows, xlsxHeaders.length);
+            applyXlsxFormatting(ws, xlsxRows.length, xlsxHeaders.length);
             ws['!cols'] = [
-                { wch: 14 },   // Entry #
-                { wch: 30 },   // Importer Name
-                ...hts99Sorted.map(() => ({ wch: 14 }))
+                { wch: 14 },  // Entry #
+                { wch: 30 },  // Importer Name
+                ...htsHeaders.map(() => ({ wch: 14 }))
             ];
             ws['!autofilter'] = { ref: XLSX.utils.encode_range({
                 s: { r: 0, c: 0 },
@@ -377,27 +359,26 @@
 
             updateProgress(80, 'Building per-importer CSVs...');
 
-            // ── Build per-importer CSVs (990301/990302 only) ─────────────
-            // Group entry numbers by importer
-            const importerEntryMap = new Map();  // importer -> Set of entry numbers
+            // Group 990301/990302 entries by importer
+            const importerEntryMap = new Map();
             for (const [entry, importer] of entry990301Map.entries()) {
-                if (!importerEntryMap.has(importer)) importerEntryMap.set(importer, new Set());
-                importerEntryMap.get(importer).add(entry);
+                if (!importerEntryMap.has(importer)) importerEntryMap.set(importer, []);
+                importerEntryMap.get(importer).push(entry);
             }
 
             importerCsvMap = new Map();
             for (const [importer, entries] of importerEntryMap.entries()) {
-                const sorted = [...entries].sort();
-                const lines = ['Entry #', ...sorted].join('\r\n');
-                importerCsvMap.set(importer, lines);
+                entries.sort();
+                importerCsvMap.set(importer, ['Entry #', ...entries].join('\r\n'));
             }
+            hasZip = importerCsvMap.size > 0;
 
             updateProgress(100, 'Complete!');
 
             setTimeout(() => {
                 progressContainer.classList.remove('active');
                 resultContainer.classList.add('active');
-                resultMessage.textContent = `Processing complete — ${entry990301Map.size === 0 ? 'No 990301/990302 entries found.' : ''}`;
+                resultMessage.textContent = 'Processing complete!';
 
                 statRow.innerHTML = `
                     <div class="stat-card">
@@ -405,8 +386,8 @@
                         <div class="stat-label">Entries with 99-series HTS</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-num">${hts99Sorted.length}</div>
-                        <div class="stat-label">Unique 99-series Codes</div>
+                        <div class="stat-num">${maxHts}</div>
+                        <div class="stat-label">Max 99 Codes / Entry</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-num">${entry990301Map.size}</div>
@@ -417,25 +398,25 @@
                         <div class="stat-label">Importer CSV Files</div>
                     </div>`;
 
-                // Build importer preview list
-                if (importerCsvMap.size > 0) {
+                if (hasZip) {
                     const items = [...importerCsvMap.entries()]
                         .sort((a, b) => a[0].localeCompare(b[0]))
                         .map(([imp, csv]) => {
-                            const cnt = csv.split('\r\n').length - 1; // subtract header
+                            const cnt = csv.split('\r\n').length - 1;
                             return `<div class="importer-item">
                                         <span>${imp}</span>
                                         <span class="importer-count">${cnt} entr${cnt === 1 ? 'y' : 'ies'}</span>
                                     </div>`;
                         }).join('');
-
                     importerListWrap.innerHTML = `
                         <div class="importer-list">
                             <div class="importer-list-header">Importers in ZIP (990301 / 990302)</div>
                             ${items}
                         </div>`;
+                    downloadBtn.textContent = '⬇️ Download XLSX + Importer CSVs';
                 } else {
-                    importerListWrap.innerHTML = '';
+                    importerListWrap.innerHTML = '<p class="no-zip-note">No 990301/990302 entries found — only the XLSX will be downloaded.</p>';
+                    downloadBtn.textContent = '⬇️ Download XLSX Summary';
                 }
             }, 400);
 
@@ -449,11 +430,11 @@
     // ── XLSX formatting ───────────────────────────────────────────────────────
     const HEADER_BG  = '0E3F5E';
     const BAND_BG    = 'EAF3F8';
-    const CHECK_BG   = 'D6EAF8';
+    const HTS_BG     = 'D6EAF8';
     const WHITE      = 'FFFFFF';
     const BORDER_CLR = 'C8D8E4';
 
-    function border() {
+    function mkBorder() {
         return {
             top:    { style: 'thin', color: { rgb: BORDER_CLR } },
             bottom: { style: 'thin', color: { rgb: BORDER_CLR } },
@@ -462,53 +443,73 @@
         };
     }
 
-    function applyXlsxFormatting(ws, data, numCols) {
-        const range = XLSX.utils.decode_range(ws['!ref']);
-        for (let R = range.s.r; R <= range.e.r; R++) {
-            for (let C = range.s.c; C <= range.e.c; C++) {
+    function applyXlsxFormatting(ws, numRows, numCols) {
+        for (let R = 0; R < numRows; R++) {
+            for (let C = 0; C < numCols; C++) {
                 const addr = XLSX.utils.encode_cell({ r: R, c: C });
                 if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+
                 const isHeader = R === 0;
-                const isCheck  = R > 0 && C >= 2 && ws[addr].v === '✓';
+                const isHtsCol = C >= 2;
+                const hasVal   = ws[addr].v !== '' && ws[addr].v !== null && ws[addr].v !== undefined;
+
                 ws[addr].s = {
-                    border: border(),
-                    alignment: { vertical: 'center', horizontal: C < 2 ? 'left' : 'center', wrapText: false },
-                    font:  isHeader ? { bold: true, color: { rgb: WHITE } }
-                         : isCheck  ? { bold: true, color: { rgb: '0E3F5E' } }
-                         :            {},
-                    fill: { fgColor: { rgb: isHeader ? HEADER_BG
-                                          : isCheck  ? CHECK_BG
-                                          : R % 2 === 0 ? BAND_BG
-                                          : WHITE } }
+                    border: mkBorder(),
+                    alignment: { vertical: 'center', horizontal: isHtsCol ? 'center' : 'left' },
+                    font:  isHeader                    ? { bold: true, color: { rgb: WHITE } }
+                         : (isHtsCol && hasVal)        ? { color: { rgb: '0E3F5E' } }
+                         :                               {},
+                    fill: { fgColor: { rgb:
+                        isHeader              ? HEADER_BG :
+                        (isHtsCol && hasVal)  ? HTS_BG   :
+                        R % 2 === 0           ? BAND_BG  : WHITE
+                    }}
                 };
             }
         }
     }
 
-    // ── Download handlers ─────────────────────────────────────────────────────
-    function downloadXlsx() {
+    // ── Single download button — everything goes into one ZIP ────────────────
+    async function downloadAll() {
         if (!xlsxWorkbook) return showError('No data to download yet.');
-        const base = fileName.textContent.replace('File: ', '').replace('.csv', '');
-        XLSX.writeFile(xlsxWorkbook, `${base}_ch99_summary.xlsx`);
-    }
 
-    async function downloadZip() {
-        if (!importerCsvMap || importerCsvMap.size === 0) {
-            return showError('No 990301/990302 entries found — nothing to ZIP.');
+        downloadBtn.disabled = true;
+        downloadBtn.textContent = '⏳ Preparing files…';
+
+        try {
+            const base = fileName.textContent.replace('File: ', '').replace('.csv', '');
+            const zip  = new JSZip();
+
+            // 1) XLSX → write to array buffer, add to ZIP
+            const xlsxBuffer = XLSX.write(xlsxWorkbook, { bookType: 'xlsx', type: 'array' });
+            zip.file(`${base}_ch99_summary.xlsx`, xlsxBuffer);
+
+            // 2) Per-importer CSVs in a subfolder (if any)
+            if (hasZip) {
+                const folder = zip.folder('importer_csvs');
+                for (const [importer, content] of importerCsvMap.entries()) {
+                    folder.file(`${sanitizeFilename(importer)}_990301_990302.csv`, content);
+                }
+            }
+
+            // 3) Single ZIP download
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            const url = URL.createObjectURL(zipBlob);
+            const a   = document.createElement('a');
+            a.href = url;
+            a.download = `${base}_ch99_export.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+        } catch (err) {
+            showError(`Download error: ${err.message}`);
+            console.error(err);
+        } finally {
+            downloadBtn.disabled = false;
+            downloadBtn.textContent = hasZip ? '⬇️ Download XLSX + Importer CSVs' : '⬇️ Download XLSX Summary';
         }
-        const zip = new JSZip();
-        const base = fileName.textContent.replace('File: ', '').replace('.csv', '');
-        const folder = zip.folder('importer_csvs');
-        for (const [importer, csvContent] of importerCsvMap.entries()) {
-            folder.file(`${sanitizeFilename(importer)}_990301_990302.csv`, csvContent);
-        }
-        const blob = await zip.generateAsync({ type: 'blob' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = `${base}_importer_csvs.zip`;
-        document.body.appendChild(a); a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
     }
 
     function showError(msg) {
